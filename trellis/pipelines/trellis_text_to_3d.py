@@ -1,18 +1,21 @@
+from pathlib import Path
 from typing import *
+
+import numpy as np
+import open3d as o3d
+import rembg
 import torch
 import torch.nn as nn
-import numpy as np
-from transformers import CLIPTextModel, AutoTokenizer
-from torchvision import transforms
 import torch.nn.functional as F
-import rembg
 from PIL import Image
-import open3d as o3d
-from .base import Pipeline
-from . import samplers
-from ..modules import sparse as sp
+from torchvision import transforms
+from transformers import AutoTokenizer, CLIPTextModel
+
 from gui import utils
-from pathlib import Path
+
+from ..modules import sparse as sp
+from . import samplers
+from .base import Pipeline
 
 
 class TrellisTextTo3DPipeline(Pipeline):
