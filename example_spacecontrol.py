@@ -6,11 +6,55 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 import torch as th
+import trimesh
 from PIL import Image
 
 # Trellis v1 Imports
 from trellis.pipelines import TrellisTextTo3DPipeline
 from trellis.utils import postprocessing_utils
+
+
+def resolve_padding(args) -> np.ndarray:
+    padding = np.array([args.normalize_padding, args.normalize_padding, args.normalize_padding], dtype=np.float64)
+    if args.normalize_padding_x is not None:
+        padding[0] = args.normalize_padding_x
+    if args.normalize_padding_y is not None:
+        padding[1] = args.normalize_padding_y
+    if args.normalize_padding_z is not None:
+        padding[2] = args.normalize_padding_z
+    fill_ratio = 1.0 - 2.0 * padding
+    if np.any(fill_ratio <= 0.0) or np.any(fill_ratio > 1.0):
+        raise ValueError(f"normalize padding must keep per-axis fill ratios in (0, 1], got padding={padding.tolist()}")
+    return padding
+
+
+def apply_denormalization_transform(glb, center: np.ndarray, scales: np.ndarray) -> None:
+    inv_scale = np.eye(4)
+    inv_scale[0, 0] = 1.0 / scales[0]
+    inv_scale[1, 1] = 1.0 / scales[1]
+    inv_scale[2, 2] = 1.0 / scales[2]
+    rot_matrix = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
+    glb.apply_transform(inv_scale)
+    glb.apply_translation(center)
+    glb.apply_transform(rot_matrix)
+
+
+def filter_components(
+    glb: trimesh.Trimesh,
+    max_y_threshold: float | None = None,
+    min_area: float | None = None,
+) -> trimesh.Trimesh:
+    components = glb.split(only_watertight=False)
+    keep = []
+    for component in components:
+        if max_y_threshold is not None and component.bounds[1][1] < max_y_threshold:
+            continue
+        if min_area is not None and component.area < min_area:
+            continue
+        keep.append(component)
+    if not keep:
+        return glb
+    return trimesh.util.concatenate(keep)
 
 
 def main(args):
@@ -42,16 +86,19 @@ def main(args):
     min_bound = aabb.get_min_bound()
     max_bound = aabb.get_max_bound()
     center = (min_bound + max_bound) / 2
-    scale = 1.0 / (max_bound - min_bound).max()
-    mesh.translate(-center)
-    mesh.scale(scale, center=(0, 0, 0))
+    max_extent = (max_bound - min_bound).max()
+    padding = resolve_padding(args)
+    scales = (1.0 - 2.0 * padding) / max_extent
+    vertices = np.asarray(mesh.vertices)
+    vertices = (vertices - center) * scales[None, :]
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
     o3d.io.write_triangle_mesh(str(last_normalized_path), mesh)
 
     # 4. Run Pipeline with SpaceControl
     # CLI의 tau 값이 노트북의 t0_idx_value 로 매핑됩니다.
     print(f"Generating 3D model with tau (t0_idx)={args.tau}...")
     outputs = pipeline.run(
-        "",  # text_prompt (기본 빈 문자열 사용)
+        args.prompt,
         image_prompt,
         seed=1,
         sparse_structure_sampler_params={
@@ -73,11 +120,13 @@ def main(args):
 
     # 6. Denormalize & Rotate (원래 크기와 위치, 회전값 복구)
     print("Applying denormalization and rotations...")
-    rot_matrix = np.array([[1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, -1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]])
-
-    glb.apply_scale(1 / scale)
-    glb.apply_translation(center)
-    glb.apply_transform(rot_matrix)
+    apply_denormalization_transform(glb, center, scales)
+    if args.drop_components_below_y is not None or args.drop_components_below_area is not None:
+        glb = filter_components(
+            glb,
+            max_y_threshold=args.drop_components_below_y,
+            min_area=args.drop_components_below_area,
+        )
     # glb.apply_scale(1.0) # 필요시 rescale 조절
 
     # 7. Export to GLB
@@ -96,7 +145,14 @@ if __name__ == "__main__":
     # v2의 example_spacecontrol.py와 완전히 동일한 인자 구성
     parser.add_argument("--image", type=str, required=True, help="Path to the input image")
     parser.add_argument("--control", type=str, required=True, help="Path to the spatial control mesh")
+    parser.add_argument("--prompt", type=str, default="a low-top sneaker", help="Sparse-stage text prompt")
     parser.add_argument("--tau", type=int, default=6, help="Strength of spatial control (maps to t0_idx, default 6)")
+    parser.add_argument("--normalize_padding", type=float, default=0.0)
+    parser.add_argument("--normalize_padding_x", type=float, default=0.02)
+    parser.add_argument("--normalize_padding_y", type=float, default=0.0)
+    parser.add_argument("--normalize_padding_z", type=float, default=0.0)
+    parser.add_argument("--drop_components_below_y", type=float, default=None)
+    parser.add_argument("--drop_components_below_area", type=float, default=None)
     parser.add_argument("--out_dir", type=str, default="outputs", help="Directory to save the generated files")
 
     args = parser.parse_args()
