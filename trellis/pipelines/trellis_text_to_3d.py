@@ -239,6 +239,7 @@ class TrellisTextTo3DPipeline(Pipeline):
         cond: dict,
         num_samples: int = 1,
         sampler_params: dict = {},
+        sampler: samplers.Sampler = None,
     ) -> torch.Tensor:
         """
         Sample sparse structures with the given conditioning.
@@ -247,14 +248,16 @@ class TrellisTextTo3DPipeline(Pipeline):
             cond (dict): The conditioning information.
             num_samples (int): The number of samples to generate.
             sampler_params (dict): Additional parameters for the sampler.
+            sampler (samplers.Sampler): Optional sampler override.
         """
         # Sample occupancy latent
         flow_model = self.models["sparse_structure_flow_model"]
         reso = flow_model.resolution
         noise = torch.randn(num_samples, flow_model.in_channels, reso, reso, reso).to(self.device)
         sampler_params = {**self.sparse_structure_sampler_params, **sampler_params}
+        sampler = sampler or self.sparse_structure_sampler
 
-        z_s = self.sparse_structure_sampler.sample(flow_model, noise, **cond, **sampler_params, verbose=True).samples
+        z_s = sampler.sample(flow_model, noise, **cond, **sampler_params, verbose=True).samples
 
         # Decode occupancy latent
         decoder = self.models["sparse_structure_decoder"]
